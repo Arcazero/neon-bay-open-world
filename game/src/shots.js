@@ -1,79 +1,104 @@
-// The screenshot scenes behind ?shot=start|play|end. Each one plays the real rules forward from a
-// fresh world for a fixed number of steps, steered by a simple autopilot (look ahead each way the
-// paddle could move, keep clear of blocks, chase the lowest coin when that is safe), so the frame
-// is what a short game really looks like and the same seed always gives the same frame.
-import { FIELD, PLAYER, STEP } from './config.js';
-import { EVENT_OVER, KIND_BLOCK } from './world.js';
-import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+// Neon Bay — the screenshot scenes behind ?shot=start|chase|mission|foot.
+// Each one stages a real moment of play from the live simulation (a stolen
+// car mid-chase, a mission marker, the title over the city) and steps it
+// forward a few seconds, so the frame is what the game really looks like.
+// The same seed always gives the same frame.
 
-const START_SECONDS = 5;
-const PLAY_SECONDS = 26;
-const END_LIMIT_SECONDS = 600;
-/**
- * How far ahead, in seconds, the autopilot checks each way it could move: the play scene's pilot
- * looks well ahead and keeps all its lives; the end scene's looks only a moment ahead, so it is
- * caught out once the blocks speed up, as a hurried player is.
- */
-const HORIZON_PLAY = 0.7;
-const HORIZON_END = 0.25;
-const SAMPLE = 1 / 30;
-const DIRECTIONS = [0, -1, 1];
-/** Extra room, each side, it keeps between the paddle and a block. */
-const MARGIN = 10;
+import { SCREEN_TITLE, SCREEN_PLAY } from './render.js';
 
-/** Seconds until moving in `direction` (-1, 0, 1) runs the paddle into a block; Infinity when it never does. */
-function timeToHit(state, direction, horizon) {
-  const player = state.player;
-  for (let t = SAMPLE; t <= horizon; t += SAMPLE) {
-    const x = Math.min(FIELD.width - player.width, Math.max(0, player.x + direction * PLAYER.speed * t));
-    for (let index = 0; index < state.items.length; index += 1) {
-      const item = state.items[index];
-      if (!item.active || item.kind !== KIND_BLOCK) continue;
-      const y = item.y + item.speed * t;
-      if (y + item.height > player.y && y < player.y + player.height && item.x < x + player.width + MARGIN && item.x + item.width > x - MARGIN) return t;
-    }
-  }
-  return Infinity;
+const STEP = 1 / 60;
+
+function scriptedInput(over) {
+  return {
+    up: !!over.up,
+    down: !!over.down,
+    left: !!over.left,
+    right: !!over.right,
+    sprint: !!over.sprint,
+    handbrake: !!over.handbrake,
+    aim: over.aim || null,
+  };
 }
 
-/** Of the safe ways to move, the one toward the lowest coin (or the centre); else the one that is hit last. */
-function autopilot(state, horizon) {
-  const player = state.player;
-  let coin = null;
-  for (let index = 0; index < state.items.length; index += 1) {
-    const item = state.items[index];
-    if (item.active && item.kind !== KIND_BLOCK && (coin === null || item.y > coin.y)) coin = item;
+function driveForward(game, seconds) {
+  for (let i = 0; i < seconds / STEP; i += 1) {
+    const events = [];
+    game.entities.step(STEP, scriptedInput({ up: true }), events);
+    game.missions.step(STEP, events);
   }
-  const target = coin === null ? FIELD.width / 2 : coin.x + coin.width / 2;
-  const centre = player.x + player.width / 2;
-  const wanted = target > centre + 8 ? 1 : target < centre - 8 ? -1 : 0;
-  let best = wanted;
-  let bestTime = timeToHit(state, wanted, horizon);
-  for (let index = 0; index < DIRECTIONS.length && bestTime !== Infinity; index += 1) {
-    const time = timeToHit(state, DIRECTIONS[index], horizon);
-    if (time > bestTime) {
-      bestTime = time;
-      best = DIRECTIONS[index];
-    }
+}
+
+function idle(game, seconds) {
+  for (let i = 0; i < seconds / STEP; i += 1) {
+    const events = [];
+    game.entities.step(STEP, scriptedInput({}), events);
+    game.missions.step(STEP, events);
   }
+}
+
+// Put the player in the nearest parked car and point it down a road.
+function stealNearestCar(game) {
+  const p = game.entities.player;
+  let best = null;
+  let bestD = Infinity;
+  for (const car of game.entities.cars) {
+    if (!car.parked) continue;
+    const d = Math.hypot(car.x - p.x, car.y - p.y);
+    if (d < bestD) { bestD = d; best = car; }
+  }
+  if (!best) return null;
+  p.x = best.x;
+  p.y = best.y;
+  game.entities.enterCar();
   return best;
 }
 
-/**
- * Set `world` to the named scene (start, play or end; any other name is start) and return the
- * screen to draw over it and the best score to show.
- */
-export function stageShot(name, world) {
-  world.reset();
-  if (name !== 'play' && name !== 'end') {
-    for (let index = 0; index < START_SECONDS / STEP; index += 1) world.step(STEP, 0, true);
-    return { screen: SCREEN_TITLE, best: 0 };
+export function stageShot(name, game, seed) {
+  const p = game.entities.player;
+  if (name === 'chase') {
+    // Cover shot: Rio in a stolen Comet GT, 3 stars, Bay PD in pursuit,
+    // mission 4 (Getaway Driver) live with the safehouse marker ahead.
+    // The car starts ON the east-west avenue (y = 1360) so it can run.
+    p.x = 1700;
+    p.y = 1360;
+    const car = stealNearestCar(game);
+    if (car) {
+      car.angle = 0; // east, down the avenue toward the safehouse
+      car.x = 1700;
+      car.y = 1360;
+      car.color = '#ff5d5d'; // a red Comet GT reads best on the cover
+      car.name = 'Comet GT';
+    }
+    game.entities.addWanted(2.9, 'screenshot chase');
+    game.entities.addWanted(0.6, 'screenshot chase');
+    const m4 = game.missions.list[3];
+    game.missions.startMission(m4);
+    driveForward(game, 3.5);
+    return { screen: SCREEN_PLAY };
   }
-  const limit = name === 'end' ? END_LIMIT_SECONDS : PLAY_SECONDS;
-  const horizon = name === 'end' ? HORIZON_END : HORIZON_PLAY;
-  for (let index = 0; index < limit / STEP; index += 1) {
-    if (world.step(STEP, autopilot(world.state, horizon), false) & EVENT_OVER) break;
+  if (name === 'mission') {
+    // On foot outside the Downtown Neon bank, vault job live, 2 stars.
+    p.x = 2400;
+    p.y = 340;
+    p.angle = 0;
+    game.entities.addWanted(2.4, 'screenshot mission');
+    const m5 = game.missions.list[4];
+    game.missions.startMission(m5);
+    idle(game, 1.5);
+    return { screen: SCREEN_PLAY };
   }
-  const over = world.state.lives === 0;
-  return { screen: over ? SCREEN_OVER : SCREEN_PLAY, best: world.state.score };
+  if (name === 'foot') {
+    // On foot in Downtown Neon: traffic, pedestrians, a cash pickup,
+    // mission 1 (First Wheels) waiting with its marker in view.
+    p.x = 1500;
+    p.y = 1050;
+    p.angle = -Math.PI / 2;
+    const m1 = game.missions.list[0];
+    game.missions.startMission(m1);
+    idle(game, 2.5);
+    return { screen: SCREEN_PLAY };
+  }
+  // Default: the title screen over a living city.
+  idle(game, 5);
+  return { screen: SCREEN_TITLE };
 }
